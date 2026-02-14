@@ -1,0 +1,21 @@
+# Agent HTTP servers
+flask==3.1.0
+
+# HTTP client for A2A communication
+requests==2.32.3
+
+# Google Calendar API
+google-api-python-client==2.166.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# Local LLM
+ollama==0.4.7
+
+# Testing
+pytest==8.3.4
+pytest-cov==6.0.0
+
+# Code quality
+black==24.10.0
+pylint==3.3.4
