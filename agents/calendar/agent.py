@@ -114,6 +114,7 @@ def _detect_conflicts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             if _times_overlap(ev1, ev2):
                 conflict_desc = {
+                    "date": ev1["date"],
                     "time": f"{ev1['day']} {ev1['time']}",
                     "events": [ev1["title"], ev2["title"]],
                     "calendar_source": ev1["calendar_source"],

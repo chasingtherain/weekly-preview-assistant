@@ -6,6 +6,10 @@ Centralizes all configuration so agents don't read env vars directly.
 import os
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 @dataclass
 class CalendarConfig:
@@ -28,7 +32,7 @@ class Settings:
 
     # Ollama
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "llama3"
+    ollama_model: str = "llama3.2"
 
     # User preferences
     user_timezone: str = "America/Los_Angeles"
@@ -69,7 +73,7 @@ def load_settings() -> Settings:
         google_token_path=os.getenv("GOOGLE_CALENDAR_TOKEN_PATH", "token.json"),
         calendars=calendars,
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        ollama_model=os.getenv("OLLAMA_MODEL", "llama3"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2"),
         user_timezone=os.getenv("USER_TIMEZONE", "America/Los_Angeles"),
         orchestrator_port=int(os.getenv("ORCHESTRATOR_PORT", "5000")),
         calendar_port=int(os.getenv("CALENDAR_PORT", "5001")),

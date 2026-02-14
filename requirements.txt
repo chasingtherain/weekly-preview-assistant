@@ -9,6 +9,9 @@ google-api-python-client==2.166.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 
+# Environment
+python-dotenv==1.2.1
+
 # Local LLM
 ollama==0.4.7
 
