@@ -1,4 +1,4 @@
-"""Tests for Formatter Agent - core logic, prompt building, and HTTP server."""
+"""Tests for Formatter Agent - chat format building and HTTP server."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -9,14 +9,17 @@ from a2a.protocol import Role, create_message, create_send_message_request, data
 from agents.formatter.agent import (
     FormatterAgent,
     _build_conflict_lookup,
-    _build_data_section,
+    _duration_minutes,
+    _format_duration_compact,
+    _format_time_compact,
     _get_calendar_sources,
-    build_prompt,
+    build_chat_format,
+    build_markdown,
 )
 
 
 # ---------------------------------------------------------------------------
-# ollama_client.py tests
+# ollama_client.py tests (kept for the module itself)
 # ---------------------------------------------------------------------------
 
 
@@ -44,7 +47,7 @@ class TestOllamaClient:
         mock_post.return_value = mock_response
 
         with pytest.raises(ValueError, match="empty response"):
-            generate("Say hello")
+            generate("Say hello", model="llama3")
 
     @patch("agents.formatter.ollama_client.requests.post")
     def test_generate_connection_error(self, mock_post) -> None:
@@ -54,7 +57,7 @@ class TestOllamaClient:
         mock_post.side_effect = req.ConnectionError("Connection refused")
 
         with pytest.raises(req.ConnectionError):
-            generate("Say hello")
+            generate("Say hello", model="llama3")
 
 
 # ---------------------------------------------------------------------------
@@ -100,16 +103,20 @@ class TestBuildConflictLookup:
         assert _build_conflict_lookup([]) == {}
 
 
-class TestBuildDataSection:
+# ---------------------------------------------------------------------------
+# agent.py - build_markdown tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMarkdown:
     def test_includes_all_seven_days(self) -> None:
-        section = _build_data_section([], [], "2025-02-17", 0, "")
-        # Monday through Sunday
+        md = build_markdown([], [], "2025-02-17")
         for day in ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]:
-            assert day in section
+            assert day in md
 
     def test_shows_na_for_empty_days(self) -> None:
-        section = _build_data_section([], [], "2025-02-17", 0, "")
-        assert "- NA" in section
+        md = build_markdown([], [], "2025-02-17")
+        assert "* NA" in md
 
     def test_groups_events_by_source(self) -> None:
         events = [
@@ -124,11 +131,11 @@ class TestBuildDataSection:
                 "location": "Park", "calendar_source": "Partner", "is_all_day": False,
             },
         ]
-        section = _build_data_section(events, [], "2025-02-17", 2, "Monday")
-        assert "Your events:" in section
-        assert "Partner's events:" in section
-        assert "Standup" in section
-        assert "Soccer" in section
+        md = build_markdown(events, [], "2025-02-17")
+        assert "Your events:" in md
+        assert "Partner's events:" in md
+        assert "Standup" in md
+        assert "Soccer" in md
 
     def test_includes_conflict_markers(self) -> None:
         events = [
@@ -146,36 +153,206 @@ class TestBuildDataSection:
                 "calendar_source": "You",
             },
         ]
-        section = _build_data_section(events, conflicts, "2025-02-17", 1, "Tuesday")
-        assert "CONFLICT" in section
-        assert "Overlaps with Client Call" in section
+        md = build_markdown(events, conflicts, "2025-02-17")
+        assert "CONFLICT" in md
+        assert "Overlaps with Client Call" in md
 
-    def test_week_header_info(self) -> None:
-        section = _build_data_section([], [], "2025-02-17", 5, "Tuesday")
-        assert "Total events: 5" in section
-        assert "Busiest day: Tuesday" in section
+    def test_week_header(self) -> None:
+        md = build_markdown([], [], "2025-02-17")
+        assert "## Week of February 17 - February 23, 2025" in md
 
+    def test_no_llm_sections(self) -> None:
+        md = build_markdown([], [], "2025-02-17")
+        assert "CALENDAR DATA" not in md
+        assert "Total events:" not in md
+        assert "Busiest day:" not in md
+        assert "INSIGHTS" not in md
 
-class TestBuildPrompt:
-    def test_prompt_contains_instructions(self) -> None:
-        prompt = build_prompt([], [], "2025-02-17", 0, "")
-        assert "WEEK AT A GLANCE" in prompt
-        assert "DAY BY DAY" in prompt
-        assert "INSIGHTS" in prompt
-        assert "CONFLICTS" in prompt
-        assert "calendar source" in prompt.lower() or "calendar source" in prompt
-
-    def test_prompt_contains_data(self) -> None:
+    def test_includes_location(self) -> None:
         events = [
             {
                 "date": "2025-02-17", "day": "Monday", "time": "9:00 AM",
-                "title": "Team Standup", "duration": "30 min", "attendees": 3,
+                "title": "Meeting", "duration": "1 hour", "attendees": 0,
+                "location": "Zoom", "calendar_source": "You", "is_all_day": False,
+            },
+        ]
+        md = build_markdown(events, [], "2025-02-17")
+        assert "Zoom" in md
+
+    def test_includes_attendees(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "9:00 AM",
+                "title": "Meeting", "duration": "1 hour", "attendees": 5,
                 "location": "", "calendar_source": "You", "is_all_day": False,
             },
         ]
-        prompt = build_prompt(events, [], "2025-02-17", 1, "Monday")
-        assert "Team Standup" in prompt
-        assert "MONDAY" in prompt
+        md = build_markdown(events, [], "2025-02-17")
+        assert "[5 attendees]" in md
+
+
+# ---------------------------------------------------------------------------
+# agent.py - build_chat_format tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildChatFormat:
+    def test_skips_empty_days(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "9:00 AM",
+                "title": "Standup", "duration": "30 min", "attendees": 5,
+                "location": "Zoom", "calendar_source": "You", "is_all_day": False,
+            },
+            {
+                "date": "2025-02-19", "day": "Wednesday", "time": "2:00 PM",
+                "title": "Sync", "duration": "1 hour", "attendees": 0,
+                "location": "", "calendar_source": "You", "is_all_day": False,
+            },
+        ]
+        output = build_chat_format(events, [], "2025-02-17")
+        assert "Mon" in output
+        assert "Wed" in output
+        assert "Tue" not in output
+        assert "Thu" not in output
+        assert "NA" not in output
+
+    def test_emoji_mapping(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "9:00 AM",
+                "title": "Meeting", "duration": "30 min", "attendees": 0,
+                "location": "", "calendar_source": "JP", "is_all_day": False,
+            },
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "3:00 PM",
+                "title": "Soccer", "duration": "1 hour", "attendees": 0,
+                "location": "", "calendar_source": "VT", "is_all_day": False,
+            },
+        ]
+        output = build_chat_format(events, [], "2025-02-17")
+        assert "🔵 JP:" in output
+        assert "🟢 VT:" in output
+
+    def test_compact_time(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "9:00 AM",
+                "title": "Standup", "duration": "30 min", "attendees": 0,
+                "location": "", "calendar_source": "You", "is_all_day": False,
+            },
+        ]
+        output = build_chat_format(events, [], "2025-02-17")
+        assert "(9am)" in output
+        assert "9:00 AM" not in output
+
+    def test_all_day_event(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "All day",
+                "title": "Birthday", "duration": "All day", "attendees": 0,
+                "location": "", "calendar_source": "You", "all_day": True,
+            },
+        ]
+        output = build_chat_format(events, [], "2025-02-17")
+        assert "(all day)" in output
+
+    def test_duration_shown_when_notable(self) -> None:
+        events = [
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "12:00 PM",
+                "title": "Long Meeting", "duration": "2 hours", "attendees": 0,
+                "location": "", "calendar_source": "You", "is_all_day": False,
+            },
+            {
+                "date": "2025-02-17", "day": "Monday", "time": "3:00 PM",
+                "title": "Quick Chat", "duration": "30 min", "attendees": 0,
+                "location": "", "calendar_source": "You", "is_all_day": False,
+            },
+        ]
+        output = build_chat_format(events, [], "2025-02-17")
+        assert "(12pm, 2hrs)" in output
+        assert "(3pm)" in output
+
+    def test_whatsapp_bold_format(self) -> None:
+        output = build_chat_format([], [], "2025-02-17")
+        # Single asterisk bold, no markdown ** or ###
+        assert "📅 *Week of" in output
+        assert "**" not in output
+        assert "###" not in output
+
+    def test_conflict_marker(self) -> None:
+        events = [
+            {
+                "date": "2025-02-18", "day": "Tuesday", "time": "2:00 PM",
+                "title": "Budget Review", "duration": "1 hour", "attendees": 0,
+                "location": "", "calendar_source": "You", "is_all_day": False,
+            },
+        ]
+        conflicts = [
+            {
+                "date": "2025-02-18",
+                "time": "Tuesday 2:00 PM",
+                "events": ["Budget Review", "Client Call"],
+                "calendar_source": "You",
+            },
+        ]
+        output = build_chat_format(events, conflicts, "2025-02-17")
+        assert "⚠️" in output
+
+    def test_week_header_same_month(self) -> None:
+        output = build_chat_format([], [], "2025-02-17")
+        assert "📅 *Week of 17-23 Feb*" in output
+
+    def test_week_header_cross_month(self) -> None:
+        output = build_chat_format([], [], "2025-02-24")
+        assert "📅 *Week of 24 Feb - 2 Mar*" in output
+
+    def test_no_events_produces_header_only(self) -> None:
+        output = build_chat_format([], [], "2025-02-17")
+        assert output == "📅 *Week of 17-23 Feb*"
+
+
+class TestFormatTimeCompact:
+    def test_on_the_hour(self) -> None:
+        assert _format_time_compact("9:00 AM") == "9am"
+        assert _format_time_compact("12:00 PM") == "12pm"
+
+    def test_with_minutes(self) -> None:
+        assert _format_time_compact("9:30 AM") == "9:30am"
+
+    def test_all_day(self) -> None:
+        assert _format_time_compact("All day") == ""
+        assert _format_time_compact("") == ""
+
+    def test_unparseable(self) -> None:
+        assert _format_time_compact("noon") == "noon"
+
+
+class TestDurationMinutes:
+    def test_hours(self) -> None:
+        assert _duration_minutes("2 hours") == 120
+        assert _duration_minutes("1 hour") == 60
+
+    def test_minutes(self) -> None:
+        assert _duration_minutes("30 min") == 30
+
+    def test_combined(self) -> None:
+        assert _duration_minutes("1 hour 30 min") == 90
+
+    def test_all_day(self) -> None:
+        assert _duration_minutes("All day") == 0
+
+    def test_empty(self) -> None:
+        assert _duration_minutes("") == 0
+
+
+class TestFormatDurationCompact:
+    def test_whole_hours(self) -> None:
+        assert _format_duration_compact("2 hours") == "2hrs"
+
+    def test_fractional(self) -> None:
+        assert _format_duration_compact("1 hour 30 min") == "1.5hrs"
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +361,8 @@ class TestBuildPrompt:
 
 
 class TestFormatterAgent:
-    @patch("agents.formatter.agent.generate")
-    def test_format_weekly_preview_success(self, mock_generate) -> None:
-        mock_generate.return_value = "# WEEK OF FEBRUARY 17-23\n\nSome preview content here."
-
-        agent = FormatterAgent(ollama_host="http://localhost:11434", ollama_model="llama3")
+    def test_format_weekly_preview_chat_format(self) -> None:
+        agent = FormatterAgent()
         result = agent.format_weekly_preview(
             events=[
                 {
@@ -203,24 +377,20 @@ class TestFormatterAgent:
             busiest_day="Monday",
         )
 
-        assert result["format"] == "markdown"
+        assert result["format"] == "chat"
         assert result["word_count"] > 0
-        assert "WEEK OF FEBRUARY" in result["formatted_summary"]
-        mock_generate.assert_called_once()
+        assert "Standup" in result["formatted_summary"]
+        assert "Mon" in result["formatted_summary"]
 
-    @patch("agents.formatter.agent.generate")
-    def test_format_weekly_preview_passes_correct_model(self, mock_generate) -> None:
-        mock_generate.return_value = "Preview content."
-
-        agent = FormatterAgent(ollama_host="http://myhost:11434", ollama_model="mistral")
-        agent.format_weekly_preview(
+    def test_format_weekly_preview_no_events(self) -> None:
+        agent = FormatterAgent()
+        result = agent.format_weekly_preview(
             events=[], conflicts=[], week_start="2025-02-17",
             total_events=0, busiest_day="",
         )
 
-        _, kwargs = mock_generate.call_args
-        assert kwargs["model"] == "mistral"
-        assert kwargs["host"] == "http://myhost:11434"
+        assert result["format"] == "chat"
+        assert "NA" not in result["formatted_summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -258,16 +428,7 @@ class TestFormatterServer:
         )
         assert response.status_code == 400
 
-    @patch("agents.formatter.server._get_agent")
-    def test_send_message_success(self, mock_get_agent, client) -> None:
-        mock_agent = MagicMock()
-        mock_agent.format_weekly_preview.return_value = {
-            "formatted_summary": "# WEEK OF FEB 17-23\n\nGreat week ahead!",
-            "format": "markdown",
-            "word_count": 6,
-        }
-        mock_get_agent.return_value = mock_agent
-
+    def test_send_message_success(self, client) -> None:
         msg = create_message(
             Role.USER,
             [data_part({
@@ -295,9 +456,7 @@ class TestFormatterServer:
         assert task["status"]["state"] == "completed"
         assert len(task["artifacts"]) == 1
         # First part is TextPart with the summary
-        assert "WEEK OF FEB" in task["artifacts"][0]["parts"][0]["text"]
-        # Second part is DataPart with metadata
-        assert task["artifacts"][0]["parts"][1]["data"]["word_count"] == 6
+        assert "Standup" in task["artifacts"][0]["parts"][0]["text"]
 
         # Verify we can also fetch the task by ID
         task_id = task["id"]
@@ -316,9 +475,9 @@ class TestFormatterServer:
         assert data["task"]["status"]["state"] == "failed"
 
     @patch("agents.formatter.server._get_agent")
-    def test_send_message_ollama_error(self, mock_get_agent, client) -> None:
+    def test_send_message_agent_error(self, mock_get_agent, client) -> None:
         mock_agent = MagicMock()
-        mock_agent.format_weekly_preview.side_effect = Exception("Ollama connection refused")
+        mock_agent.format_weekly_preview.side_effect = Exception("Unexpected error")
         mock_get_agent.return_value = mock_agent
 
         msg = create_message(

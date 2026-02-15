@@ -1,13 +1,11 @@
-"""Formatter Agent HTTP Server.
+"""Telegram Agent HTTP Server.
 
 A2A-compliant Flask server that:
 - Serves its Agent Card at GET /.well-known/agent.json (discovery)
 - Handles POST /message/send (SendMessage RPC)
 - Handles GET /tasks/<id> (GetTask RPC)
 
-A2A Concept: Second A2A agent in the system. Receives calendar data
-via a DataPart, processes it through an LLM (Ollama), and returns the
-formatted weekly preview as a TextPart artifact.
+Receives formatted text via A2A DataPart and sends it to a Telegram chat.
 """
 
 import logging
@@ -29,7 +27,7 @@ from a2a.protocol import (
     text_part,
 )
 from a2a.validator import validate_send_message_request
-from agents.formatter.agent import FormatterAgent
+from agents.telegram.agent import TelegramAgent
 from config.settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -40,16 +38,20 @@ app = Flask(__name__)
 _tasks: dict[str, dict[str, Any]] = {}
 
 # Agent instance (initialized on startup)
-_agent: FormatterAgent | None = None
+_agent: TelegramAgent | None = None
 
-AGENT_ID = "formatter-001"
+AGENT_ID = "telegram-001"
 
 
-def _get_agent() -> FormatterAgent:
-    """Get or initialize the FormatterAgent instance."""
+def _get_agent() -> TelegramAgent:
+    """Get or initialize the TelegramAgent instance."""
     global _agent
     if _agent is None:
-        _agent = FormatterAgent()
+        settings = load_settings()
+        _agent = TelegramAgent(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
     return _agent
 
 
@@ -57,17 +59,16 @@ def _build_agent_card() -> dict[str, Any]:
     """Build the Agent Card for this agent."""
     settings = load_settings()
     return create_agent_card(
-        name="Formatter Agent",
-        description="Formats structured calendar data into a human-friendly weekly preview. "
-        "Groups events by day and calendar source deterministically.",
-        url=f"http://localhost:{settings.formatter_port}",
+        name="Telegram Agent",
+        description="Sends formatted text messages to a Telegram chat via Bot API.",
+        url=f"http://localhost:{settings.telegram_port}",
         skills=[
             create_skill(
-                skill_id="format_weekly_preview",
-                name="Format Weekly Preview",
-                description="Generate a formatted markdown weekly preview from calendar event data.",
-                tags=["formatter", "summary", "markdown"],
-                examples=["Format my weekly calendar", "Generate a weekly preview"],
+                skill_id="send_telegram_message",
+                name="Send Telegram Message",
+                description="Send a text message to a configured Telegram chat.",
+                tags=["telegram", "delivery", "notification"],
+                examples=["Send weekly preview to Telegram"],
             ),
         ],
     )
@@ -89,10 +90,10 @@ def send_message() -> tuple[Response, int]:
     """Handle a SendMessage request.
 
     Expects a DataPart with:
-    - action: "format_weekly_preview"
-    - parameters: {events, conflicts, week_start, total_events, busiest_day}
+    - action: "send_telegram_message"
+    - parameters: {text: "..."}
 
-    Returns a Task with a TextPart artifact containing the formatted summary.
+    Returns a Task with a DataPart artifact containing delivery result.
     """
     incoming = request.json
     log_a2a_message(incoming, direction="incoming", agent_id=AGENT_ID)
@@ -125,31 +126,26 @@ def send_message() -> tuple[Response, int]:
     # Update to WORKING
     task["status"] = create_task_status(
         TaskState.WORKING,
-        message=create_message(Role.AGENT, [text_part("Generating weekly preview...")]),
+        message=create_message(Role.AGENT, [text_part("Sending Telegram message...")]),
     )
 
     # Process the request
     try:
         agent = _get_agent()
-        result = agent.format_weekly_preview(
-            events=params.get("events", []),
-            conflicts=params.get("conflicts", []),
-            week_start=params.get("week_start", ""),
-            total_events=params.get("total_events", 0),
-            busiest_day=params.get("busiest_day", ""),
-        )
+        text = params.get("text", "")
+        if not text:
+            raise ValueError("No text provided to send")
 
-        # Create artifact with the formatted summary
+        result = agent.send_message(text)
+
+        if "error" in result:
+            raise RuntimeError(result["error"])
+
+        # Create artifact with delivery result
         artifact = create_artifact(
-            parts=[
-                text_part(result["formatted_summary"]),
-                data_part({
-                    "format": result["format"],
-                    "word_count": result["word_count"],
-                }),
-            ],
-            name="weekly-preview",
-            description=f"Weekly preview for week of {params.get('week_start')}",
+            parts=[data_part(result)],
+            name="telegram-delivery",
+            description="Telegram message delivery result",
         )
         task["artifacts"] = [artifact]
 
@@ -158,12 +154,12 @@ def send_message() -> tuple[Response, int]:
             TaskState.COMPLETED,
             message=create_message(
                 Role.AGENT,
-                [text_part(f"Generated weekly preview ({result['word_count']} words).")],
+                [text_part(f"Message sent to Telegram (message_id: {result['message_id']}).")],
             ),
         )
 
     except Exception as e:
-        logger.error("Failed to generate preview: %s", e)
+        logger.error("Failed to send Telegram message: %s", e)
         task["status"] = create_task_status(
             TaskState.FAILED,
             message=create_message(Role.AGENT, [text_part(f"Error: {e}")]),
@@ -192,8 +188,6 @@ def get_task(task_id: str) -> tuple[Response, int]:
 def _extract_params(message: dict[str, Any]) -> dict[str, Any] | None:
     """Extract action parameters from a Message's DataParts.
 
-    Looks for a DataPart containing "action" and "parameters" keys.
-
     Args:
         message: An A2A Message dict.
 
@@ -216,5 +210,5 @@ def _extract_params(message: dict[str, Any]) -> dict[str, Any] | None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     settings = load_settings()
-    print(f"Formatter Agent starting on port {settings.formatter_port}...")
-    app.run(host="0.0.0.0", port=settings.formatter_port, debug=False)
+    print(f"Telegram Agent starting on port {settings.telegram_port}...")
+    app.run(host="0.0.0.0", port=settings.telegram_port, debug=False)

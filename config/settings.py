@@ -37,10 +37,15 @@ class Settings:
     # User preferences
     user_timezone: str = "America/Los_Angeles"
 
+    # Telegram
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Agent ports
     orchestrator_port: int = 5000
     calendar_port: int = 5001
     formatter_port: int = 5002
+    telegram_port: int = 5003
 
 
 def load_settings() -> Settings:
@@ -78,4 +83,7 @@ def load_settings() -> Settings:
         orchestrator_port=int(os.getenv("ORCHESTRATOR_PORT", "5000")),
         calendar_port=int(os.getenv("CALENDAR_PORT", "5001")),
         formatter_port=int(os.getenv("FORMATTER_PORT", "5002")),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        telegram_port=int(os.getenv("TELEGRAM_PORT", "5003")),
     )

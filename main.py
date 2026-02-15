@@ -102,6 +102,7 @@ def main() -> None:
     # Start agent servers
     calendar_url = f"http://127.0.0.1:{settings.calendar_port}"
     formatter_url = f"http://127.0.0.1:{settings.formatter_port}"
+    telegram_url = ""
 
     start_agent_server(calendar_app, settings.calendar_port, "Calendar Agent")
     print(f"  Calendar Agent started on port {settings.calendar_port}")
@@ -109,9 +110,20 @@ def main() -> None:
     start_agent_server(formatter_app, settings.formatter_port, "Formatter Agent")
     print(f"  Formatter Agent started on port {settings.formatter_port}")
 
+    agent_urls = [calendar_url, formatter_url]
+
+    # Start Telegram agent only if configured
+    if settings.telegram_bot_token:
+        from agents.telegram.server import app as telegram_app
+
+        telegram_url = f"http://127.0.0.1:{settings.telegram_port}"
+        start_agent_server(telegram_app, settings.telegram_port, "Telegram Agent")
+        print(f"  Telegram Agent started on port {settings.telegram_port}")
+        agent_urls.append(telegram_url)
+
     # Wait for agents to be ready
     print("  Waiting for agents to be ready...")
-    if not wait_for_agents([calendar_url, formatter_url]):
+    if not wait_for_agents(agent_urls):
         print("  ERROR: Agents failed to start within timeout. Exiting.")
         sys.exit(1)
 
@@ -134,6 +146,7 @@ def main() -> None:
         formatter_url=formatter_url,
         calendars=calendars,
         timezone=settings.user_timezone,
+        telegram_url=telegram_url,
     )
 
     print("Fetching calendar events...")
@@ -144,6 +157,8 @@ def main() -> None:
         sys.exit(1)
 
     print(f"  Retrieved {result['total_events']} events")
+    if result.get("telegram_sent"):
+        print("  Sent to Telegram")
     print()
     print(f"Weekly preview saved to: {result['file_path']}")
 

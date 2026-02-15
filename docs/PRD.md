@@ -6,7 +6,7 @@
 ## 1. Overview
 
 ### Product Vision
-A personal assistant system that automatically compiles a cohesive weekly preview by coordinating multiple AI agents through the Agent-to-Agent (A2A) protocol. Users manually trigger the system to receive a single, well-formatted summary of their upcoming week.
+A personal assistant system that automatically compiles a cohesive weekly preview by coordinating multiple AI agents through the Agent-to-Agent (A2A) protocol. The system runs automatically every Sunday via macOS launchd and delivers a compact, messaging-friendly preview to Telegram.
 
 ### Success Criteria
 - User can trigger system with single command
@@ -23,12 +23,13 @@ A personal assistant system that automatically compiles a cohesive weekly previe
 > Sarah works a busy job and wants to start each week prepared. Every Sunday evening, she runs a simple command and receives a comprehensive preview of her upcoming week, highlighting important meetings, deadlines, and potential conflicts.
 
 **User Flow:**
-1. User runs command: `python main.py` (defaults to current week) or `python main.py --next` (following week)
+1. System triggers automatically every Sunday at 7pm via launchd (or manually: `python main.py --next`)
 2. Weeks start on **Monday** and end on **Sunday**
 3. Orchestrator agent coordinates data collection
 4. Calendar agent fetches week's events
-5. Formatter agent creates readable summary
-6. User receives formatted weekly preview saved to file
+5. Formatter agent creates compact chat-formatted summary
+6. Telegram agent delivers the preview to the user's chat
+7. Summary is also saved to file as backup
 
 ---
 
@@ -54,10 +55,12 @@ A personal assistant system that automatically compiles a cohesive weekly previe
 **A2A Messages Sent:**
 - `task_request` to Calendar Agent
 - `format_request` to Formatter Agent
+- `send_telegram_message` to Telegram Agent (optional)
 
 **A2A Messages Received:**
 - `task_response` from Calendar Agent
 - `format_response` from Formatter Agent
+- `task_response` from Telegram Agent (delivery confirmation)
 
 ### 3.2 Calendar Agent
 
@@ -148,50 +151,44 @@ A personal assistant system that automatically compiles a cohesive weekly previe
 
 **Responsibilities:**
 - Receive structured data from orchestrator
-- Use Ollama (local LLM) to generate human-friendly summary
-- Organize by day of week
-- **Group events by calendar source within each day** (e.g., "My events:", "Partner's events:")
-- Display "NA" when a calendar has no events for a specific day
-- Use bullet point format for events within each group
-- Highlight busy days or conflicts (inline with events)
-- Create actionable insights
-- Return formatted markdown/text
+- Build a compact, messaging-friendly summary deterministically (no LLM)
+- Organize by day of week, skip empty days
+- Use emoji dots per calendar source (e.g., 🔵 JP, 🟢 VT)
+- One line per event with compact time format
+- Inline conflict markers (⚠️)
+- Use WhatsApp-compatible formatting (single `*bold*`)
+- Return formatted chat text
 
-**Input (A2A Message):**
-```json
-{
-  "message_id": "uuid",
-  "from_agent": "orchestrator",
-  "to_agent": "formatter",
-  "message_type": "format_request",
-  "data": {
-    "calendar_events": [...],
-    "conflicts": [...],
-    "week_start": "2025-02-17",
-    "user_preferences": {
-      "timezone": "user_local",
-      "format": "markdown"
-    }
-  }
-}
+**Output format:**
+```
+📅 *Week of 17-23 Feb*
+
+*Mon 17 Feb*
+🔵 JP: Team Standup (9am)
+🟢 VT: Soccer Practice (3pm)
+
+*Tue 18 Feb*
+🔵 JP: Budget Review (10am) ⚠️
+🔵 JP: Client Call (2pm, 2hrs)
+🟢 VT: Doctor Appointment (3pm)
 ```
 
-**Output (A2A Message):**
-```json
-{
-  "message_id": "uuid",
-  "in_reply_to": "original-uuid",
-  "from_agent": "formatter",
-  "to_agent": "orchestrator",
-  "message_type": "format_response",
-  "status": "success",
-  "result": {
-    "formatted_summary": "# WEEK OF FEB 17-23...",
-    "format": "markdown",
-    "word_count": 450
-  }
-}
-```
+### 3.4 Telegram Agent
+
+**Responsibilities:**
+- Receive formatted text via A2A message from orchestrator
+- Send the text to a configured Telegram chat via Bot API
+- Return delivery confirmation (message_id, chat_id, sent_at)
+- Handle API errors gracefully
+
+**Configuration:**
+- `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
+- `TELEGRAM_CHAT_ID`: Target chat or group ID
+
+**Notes:**
+- Uses `requests` library to call Telegram Bot API directly (no extra dependency)
+- Delivery is optional — if not configured, the workflow skips Telegram
+- Telegram failure does not block the rest of the workflow (file save still happens)
 
 ---
 
@@ -229,14 +226,15 @@ Each agent registers its capabilities on startup:
 ### 4.3 Communication Flow
 
 ```
-1. User runs command
-2. Orchestrator discovers agents from registry
-3. Orchestrator → Calendar Agent (task_request)
-4. Calendar Agent processes → Returns (task_response)
-5. Orchestrator → Formatter Agent (format_request with calendar data)
-6. Formatter Agent processes with Ollama → Returns (format_response)
-7. Orchestrator saves final summary
-8. Orchestrator prints success message with file location
+1. launchd triggers `python main.py --next` (or user runs manually)
+2. Orchestrator discovers agents via Agent Cards
+3. Orchestrator → Calendar Agent (fetch_week_events)
+4. Calendar Agent processes → Returns events and conflicts
+5. Orchestrator → Formatter Agent (format_weekly_preview)
+6. Formatter Agent builds compact chat format → Returns text
+7. Orchestrator → Telegram Agent (send_telegram_message) [optional]
+8. Telegram Agent sends to chat → Returns delivery confirmation
+9. Orchestrator saves summary to file
 ```
 
 ### 4.4 Error Handling
@@ -281,10 +279,13 @@ weekly-preview-assistant/
 │   │   ├── agent.py
 │   │   ├── server.py
 │   │   └── google_client.py
-│   └── formatter/
+│   ├── formatter/
+│   │   ├── agent.py
+│   │   ├── server.py
+│   │   └── ollama_client.py
+│   └── telegram/
 │       ├── agent.py
-│       ├── server.py
-│       └── ollama_client.py
+│       └── server.py
 ├── a2a/
 │   ├── protocol.py (message schemas)
 │   ├── registry.py (agent discovery)
@@ -312,15 +313,15 @@ weekly-preview-assistant/
 - Requests (HTTP client for A2A)
 
 **APIs:**
-- Google Calendar API (OAuth 2.0, read-only access to primary calendar)
-- Ollama (local LLM for formatting)
+- Google Calendar API (OAuth 2.0, read-only access)
+- Telegram Bot API (message delivery)
 
 **Data Storage:**
 - JSON files (agent registry, message logs)
 - Local file system (summaries)
 
-**LLM:**
-- Ollama with llama3 or similar model (free, local)
+**Scheduling:**
+- macOS launchd (runs weekly, catches up if Mac was asleep)
 
 ### 5.3 Agent Communication
 
@@ -330,6 +331,7 @@ weekly-preview-assistant/
 - Orchestrator: 5000
 - Calendar Agent: 5001
 - Formatter Agent: 5002
+- Telegram Agent: 5003
 
 ---
 
@@ -365,81 +367,58 @@ Weekly preview saved to: output/summaries/2025-02-17.md
 
 ### 6.2 Output Format
 
-**Markdown file** saved to `output/summaries/YYYY-MM-DD.md`
+**Compact chat format** optimised for Telegram/WhatsApp delivery:
 
-**Structure:**
-```markdown
-# WEEK OF FEBRUARY 17-23, 2025
-
-## 🗓️ WEEK AT A GLANCE
-- Total events: 12
-- Busiest day: Tuesday (5 meetings)
-- Light days: Thursday, Saturday
-
-## 📅 DAY BY DAY
-
-### MONDAY, FEBRUARY 17
-
-**My events:**
-* 9:00 AM - Team Standup (30 min)
-* 2:00 PM - Client Call (1 hour) - Zoom
-
-**Partner's events:**
-* 3:00 PM - Kids Soccer Practice (1 hour) - Park
-
-### TUESDAY, FEBRUARY 18 ⚠️ BUSY DAY
-
-**My events:**
-* 10:00 AM - Budget Review (1 hour)
-* 2:00 PM - Project Sync (45 min) ⚠️ CONFLICT: Overlaps with Budget Review
-* 4:00 PM - 1-on-1 with Manager (30 min)
-
-**Partner's events:**
-* 3:00 PM - Doctor Appointment (1 hour)
-
-### WEDNESDAY, FEBRUARY 19
-
-**My events:**
-* 11:00 AM - Marketing Sync (45 min)
-
-**Partner's events:**
-* 2:00 PM - School Pickup
-
-### THURSDAY, FEBRUARY 20
-
-**My events:**
-* NA
-
-**Partner's events:**
-* 10:00 AM - Dentist (30 min)
-
-[... continues for each day ...]
-
-## 💡 INSIGHTS
-- Tuesday is your busiest day with 3 meetings
-- Scheduling conflict on Tuesday at 2 PM - reschedule one meeting
-- Thursday has no events for you - good for deep work
-- Remember to prepare deck for Monday client call
-
-## ⚠️ CONFLICTS
-1. **Tuesday 2:00 PM**: Budget Review overlaps with Project Sync
 ```
+📅 *Week of 17-23 Feb*
+
+*Mon 17 Feb*
+🔵 JP: Team Standup (9am)
+🔵 JP: Client Call (2pm) - Zoom
+🟢 VT: Soccer Practice (3pm)
+
+*Tue 18 Feb*
+🔵 JP: Budget Review (10am) ⚠️
+🔵 JP: Project Sync (2pm)
+🔵 JP: 1-on-1 with Manager (4pm)
+🟢 VT: Doctor Appointment (3pm)
+
+*Wed 19 Feb*
+🔵 JP: Marketing Sync (11am)
+🟢 VT: School Pickup (2pm)
+
+*Thu 20 Feb*
+🟢 VT: Dentist (10am)
+```
+
+Key format rules:
+- Empty days are skipped entirely (no "NA")
+- Emoji dots distinguish calendar sources (🔵 first, 🟢 second)
+- One line per event with compact time (9am not 9:00 AM)
+- Duration only shown if > 1 hour (e.g., "2hrs")
+- Conflict marker ⚠️ inline
+- Single `*bold*` for WhatsApp/Telegram compatibility
+
+Also saved to `output/summaries/` as backup.
 
 ### 6.3 Delivery Method
 
-**MVP:** File saved locally to `output/summaries/`
-- User checks file after running command
-- File path printed in terminal output
-- Can be opened in any markdown viewer or text editor
+**Primary:** Telegram Bot delivery
+- Sent automatically to configured Telegram chat/group
+- Delivery is optional (requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`)
+- If Telegram is not configured or fails, summary is still saved to file
+
+**Backup:** File saved locally to `output/summaries/`
 
 ---
 
 ## 7. Non-Functional Requirements
 
 ### 7.1 Performance
-- Total execution time: < 30 seconds
+- Total execution time: < 15 seconds
 - Calendar API response: < 5 seconds
-- Ollama formatting: < 20 seconds
+- Formatter (deterministic): < 1 second
+- Telegram delivery: < 5 seconds
 - Agent startup time: < 3 seconds
 
 ### 7.2 Reliability
@@ -457,7 +436,7 @@ Weekly preview saved to: output/summaries/2025-02-17.md
 
 ### 7.4 Cost
 - Google Calendar API: Free (within quota)
-- Ollama: Free (runs locally)
+- Telegram Bot API: Free
 - Total: $0/month operational cost
 
 ### 7.5 Scalability
@@ -470,21 +449,23 @@ Weekly preview saved to: output/summaries/2025-02-17.md
 
 ### 8.1 Prerequisites
 - Python 3.10+
-- Ollama installed and running locally
 - Google Cloud project with Calendar API enabled
 - OAuth 2.0 credentials
+- Telegram bot (created via @BotFather)
 
 ### 8.2 Environment Variables
 ```bash
 GOOGLE_CALENDAR_CREDENTIALS_PATH=/path/to/credentials.json
 GOOGLE_CALENDAR_TOKEN_PATH=/path/to/token.json
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=llama3
 USER_TIMEZONE=America/Los_Angeles
 
 # Multi-calendar configuration
 CALENDAR_IDS=primary,partner@gmail.com
 CALENDAR_LABELS=You,Partner
+
+# Telegram delivery (optional)
+TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
+TELEGRAM_CHAT_ID=your-chat-id
 ```
 
 ### 8.3 First Run Setup
@@ -492,14 +473,15 @@ CALENDAR_LABELS=You,Partner
 # Install dependencies
 pip install -r requirements.txt
 
-# Install Ollama model
-ollama pull llama3
-
 # Authenticate with Google Calendar (one-time)
 python setup_calendar.py
 
 # Run the system
 python main.py
+
+# Set up automatic scheduling (macOS)
+cp com.jp.weekly-preview.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.jp.weekly-preview.plist
 ```
 
 ---
@@ -537,10 +519,13 @@ python main.py
 3. **Summary length**: Full day-by-day breakdown, 300-500 words ✓
 4. **Conflict detection**: Overlapping time blocks only ✓
 5. **Failure mode**: Log error, skip that week, notify user ✓
-6. **Trigger mechanism**: User runs command manually ✓
-7. **LLM choice**: Ollama (local, free) for MVP ✓
+6. **Trigger mechanism**: Automatic via launchd (Sunday 7pm), manual fallback ✓
+7. **Formatting**: Deterministic code (no LLM needed for structured calendar data) ✓
 8. **Week definition**: Monday through Sunday ✓
 9. **Week selection**: `--next` flag for following week, default is current week ✓
+10. **Output format**: Compact chat format for messaging apps (not verbose markdown) ✓
+11. **Delivery method**: Telegram Bot API (free, reliable, great formatting) ✓
+12. **Scheduling**: macOS launchd with missed-job catch-up on wake ✓
 
 ---
 
@@ -552,10 +537,9 @@ python main.py
 - **Context Agent**: Learn patterns, provide insights
 
 ### Features
-- Automatic scheduling (cron job for Sunday evenings)
-- Multi-calendar support (work + personal)
-- Customizable output formats (PDF, HTML, email)
-- Email or Slack delivery
+- ~~Automatic scheduling (cron job for Sunday evenings)~~ Done (launchd)
+- ~~Multi-calendar support (work + personal)~~ Done
+- ~~Messaging delivery~~ Done (Telegram)
 - Meeting prep suggestions
 - Travel time calculations
 - Smart conflict resolution suggestions
@@ -660,6 +644,6 @@ python main.py
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** February 14, 2025  
-**Status:** Ready for Development
+**Document Version:** 2.0
+**Last Updated:** February 15, 2026
+**Status:** Implemented

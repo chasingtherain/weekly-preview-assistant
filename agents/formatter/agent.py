@@ -1,32 +1,20 @@
 """Formatter Agent - Core logic.
 
-Builds an LLM prompt from structured calendar data and uses Ollama to
-generate a human-friendly weekly preview. The prompt enforces the output
-format defined in the PRD: events grouped by calendar source per day,
-"NA" for empty days, bullet points, and inline conflict markers.
+Builds a deterministic weekly preview from structured calendar data.
+Output uses a compact chat format optimised for messaging apps (Telegram,
+WhatsApp): emoji dots per calendar source, one line per event, empty days
+skipped, and single-asterisk bold for WhatsApp compatibility.
 """
 
 import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from agents.formatter.ollama_client import generate
-
 logger = logging.getLogger(__name__)
 
 
 class FormatterAgent:
-    """Formats calendar data into a weekly preview using a local LLM."""
-
-    def __init__(self, ollama_host: str, ollama_model: str) -> None:
-        """Initialize the FormatterAgent.
-
-        Args:
-            ollama_host: Ollama server URL (e.g. "http://localhost:11434").
-            ollama_model: Model name (e.g. "llama3").
-        """
-        self.ollama_host = ollama_host
-        self.ollama_model = ollama_model
+    """Formats calendar data into a weekly preview deterministically."""
 
     def format_weekly_preview(
         self,
@@ -48,99 +36,194 @@ class FormatterAgent:
         Returns:
             Result dict with "formatted_summary", "format", and "word_count".
         """
-        prompt = build_prompt(events, conflicts, week_start, total_events, busiest_day)
-        logger.info("Built prompt for week of %s (%d chars)", week_start, len(prompt))
-
-        summary = generate(
-            prompt=prompt,
-            model=self.ollama_model,
-            host=self.ollama_host,
-        )
+        summary = build_chat_format(events, conflicts, week_start)
+        logger.info("Built chat format for week of %s (%d chars)", week_start, len(summary))
 
         word_count = len(summary.split())
 
         return {
             "formatted_summary": summary,
-            "format": "markdown",
+            "format": "chat",
             "word_count": word_count,
         }
 
 
-def build_prompt(
+SOURCE_EMOJIS = ["🔵", "🟢", "🟡", "🔴", "🟣", "🟠"]
+
+
+def build_chat_format(
     events: list[dict[str, Any]],
     conflicts: list[dict[str, Any]],
     week_start: str,
-    total_events: int,
-    busiest_day: str,
 ) -> str:
-    """Build the LLM prompt from calendar data.
+    """Build a compact chat-friendly summary from calendar data.
 
-    Structures the data into a clear format so the LLM can produce
-    the weekly preview matching the PRD output spec.
+    Designed for Telegram/WhatsApp: emoji dots per calendar source,
+    one line per event, empty days skipped entirely, single-asterisk
+    bold for WhatsApp compatibility.
 
     Args:
         events: List of event dicts.
         conflicts: List of conflict dicts.
         week_start: Start date (YYYY-MM-DD, a Monday).
-        total_events: Total number of events.
-        busiest_day: Name of the busiest day.
 
     Returns:
-        The complete prompt string.
+        Compact chat-formatted string.
     """
-    # Build the structured data section
-    data_section = _build_data_section(events, conflicts, week_start, total_events, busiest_day)
+    start = datetime.strptime(week_start, "%Y-%m-%d")
+    end = start + timedelta(days=6)
 
-    prompt = f"""You are a personal assistant that creates weekly calendar previews.
+    # Build source → emoji mapping
+    sources = _get_calendar_sources(events)
+    emoji_map = {src: SOURCE_EMOJIS[i % len(SOURCE_EMOJIS)] for i, src in enumerate(sources)}
 
-Given the calendar data below, generate a well-formatted markdown summary following this EXACT structure:
+    # Build conflict lookup
+    conflict_lookup = _build_conflict_lookup(conflicts)
 
-1. **WEEK AT A GLANCE** — Total events, busiest day, light days
-2. **DAY BY DAY** — Each day Monday through Sunday with:
-   - Events grouped under **My events:** and **Partner's events:** (or whatever the calendar source labels are)
-   - If a calendar has no events for that day, show "* NA"
-   - Each event as a bullet: "* TIME - TITLE (DURATION)" with optional location
-   - Inline conflict markers: "⚠️ CONFLICT: Overlaps with EVENT_NAME"
-   - Busy day markers in the day heading: "⚠️ BUSY DAY"
-3. **INSIGHTS** — 3-5 actionable observations about the week
-4. **CONFLICTS** — List all scheduling conflicts (if any)
+    # Week header
+    start_day = start.day
+    end_day = end.day
+    month = start.strftime("%b")
+    end_month = end.strftime("%b")
+    if month == end_month:
+        header = f"📅 *Week of {start_day}-{end_day} {month}*"
+    else:
+        header = f"📅 *Week of {start_day} {month} - {end_day} {end_month}*"
 
-IMPORTANT RULES:
-- Use the exact calendar source labels from the data (e.g., "You", "Partner")
-- Show EVERY day Monday through Sunday, even if both calendars have no events
-- Group events by calendar source within each day
-- Mark conflicts inline next to the conflicting events
-- Keep the tone friendly and helpful
-- Do NOT invent or add events that aren't in the data
+    lines = [header]
 
-{data_section}
+    # Generate each day
+    for i in range(7):
+        day_date = start + timedelta(days=i)
+        date_str = day_date.strftime("%Y-%m-%d")
+        day_events = [e for e in events if e.get("date") == date_str]
 
-Generate the weekly preview now:"""
+        if not day_events:
+            continue
 
-    return prompt
+        day_header = day_date.strftime("%a %-d %b")
+        lines.append("")
+        lines.append(f"*{day_header}*")
+
+        for ev in day_events:
+            source = ev.get("calendar_source", "Unknown")
+            emoji = emoji_map.get(source, "⚪")
+            title = ev.get("title", "Untitled")
+            time_str = _format_time_compact(ev.get("time", ""))
+            duration = ev.get("duration", "")
+            is_all_day = ev.get("all_day", False) or time_str == ""
+
+            if is_all_day:
+                time_part = "(all day)"
+            elif _duration_minutes(duration) > 60:
+                time_part = f"({time_str}, {_format_duration_compact(duration)})"
+            else:
+                time_part = f"({time_str})"
+
+            line = f"{emoji} {source}: {title} {time_part}"
+
+            # Conflict marker
+            if conflict_lookup.get((date_str, title)):
+                line += " ⚠️"
+
+            lines.append(line)
+
+    return "\n".join(lines)
 
 
-def _build_data_section(
+def _format_time_compact(time_str: str) -> str:
+    """Convert '9:00 AM' to '9am', '12:00 PM' to '12pm'.
+
+    Args:
+        time_str: Time string like '9:00 AM' or 'All day'.
+
+    Returns:
+        Compact time string, or empty string if unparseable.
+    """
+    if not time_str or time_str.lower() in ("all day", ""):
+        return ""
+    try:
+        parsed = datetime.strptime(time_str.strip(), "%I:%M %p")
+        hour = parsed.strftime("%-I")
+        minute = parsed.strftime("%M")
+        ampm = parsed.strftime("%p").lower()
+        if minute == "00":
+            return f"{hour}{ampm}"
+        return f"{hour}:{minute}{ampm}"
+    except ValueError:
+        return time_str
+
+
+def _duration_minutes(duration: str) -> int:
+    """Parse a duration string into total minutes.
+
+    Handles formats like '1 hour', '30 min', '2 hours', '1 hour 30 min',
+    'All day'.
+
+    Args:
+        duration: Duration string from calendar agent.
+
+    Returns:
+        Total minutes, or 0 if unparseable.
+    """
+    if not duration or "all day" in duration.lower():
+        return 0
+    total = 0
+    lower = duration.lower()
+    parts = lower.replace(",", " ").split()
+    i = 0
+    while i < len(parts):
+        try:
+            num = int(parts[i])
+            if i + 1 < len(parts):
+                unit = parts[i + 1]
+                if "hour" in unit:
+                    total += num * 60
+                elif "min" in unit:
+                    total += num
+                i += 2
+            else:
+                i += 1
+        except ValueError:
+            i += 1
+    return total
+
+
+def _format_duration_compact(duration: str) -> str:
+    """Convert '2 hours' to '2hrs', '1 hour 30 min' to '1.5hrs'.
+
+    Args:
+        duration: Duration string.
+
+    Returns:
+        Compact duration string.
+    """
+    minutes = _duration_minutes(duration)
+    if minutes <= 0:
+        return duration
+    hours = minutes / 60
+    if hours == int(hours):
+        return f"{int(hours)}hrs"
+    return f"{hours:.1f}hrs".replace(".0hrs", "hrs")
+
+
+def build_markdown(
     events: list[dict[str, Any]],
     conflicts: list[dict[str, Any]],
     week_start: str,
-    total_events: int,
-    busiest_day: str,
 ) -> str:
-    """Build the structured data section of the prompt.
+    """Build the final markdown summary from calendar data.
 
-    Groups events by day and calendar source so the LLM can easily
-    parse them.
+    Groups events by day and calendar source, adds inline conflict
+    markers, and shows "NA" for empty source/day combinations.
 
     Args:
         events: List of event dicts.
         conflicts: List of conflict dicts.
-        week_start: Start date (YYYY-MM-DD).
-        total_events: Total number of events.
-        busiest_day: Name of the busiest day.
+        week_start: Start date (YYYY-MM-DD, a Monday).
 
     Returns:
-        Formatted data string.
+        Complete markdown string ready to save to file.
     """
     # Parse week start and generate all 7 days
     start = datetime.strptime(week_start, "%Y-%m-%d")
@@ -159,54 +242,48 @@ def _build_data_section(
     # Build conflict lookup: (date, title) → conflict description
     conflict_lookup = _build_conflict_lookup(conflicts)
 
-    # Format week end date
+    # Week header
     end = start + timedelta(days=6)
-    week_end_display = end.strftime("%B %d").replace(" 0", " ")
     week_start_display = start.strftime("%B %d").replace(" 0", " ")
+    week_end_display = end.strftime("%B %d").replace(" 0", " ")
     year = start.strftime("%Y")
 
     lines = [
-        "--- CALENDAR DATA ---",
-        f"Week: {week_start_display} - {week_end_display}, {year}",
-        f"Total events: {total_events}",
-        f"Busiest day: {busiest_day}",
+        f"## Week of {week_start_display} - {week_end_display}, {year}",
         "",
     ]
 
     # Group events by day
     for day in days:
         lines.append(f"### {day['name'].upper()}, {day['display'].upper()}")
+        lines.append("")
 
         day_events = [e for e in events if e.get("date") == day["date"]]
 
         for source in sources:
-            source_events = [e for e in day_events if e.get("calendar_source") == source]
+            source_events = [
+                e for e in day_events if e.get("calendar_source") == source
+            ]
             possessive = "Your" if source == "You" else f"{source}'s"
-            lines.append(f"  {possessive} events:")
+            lines.append(f"**{possessive} events:**")
             if source_events:
                 for ev in source_events:
-                    line = f"    - {ev['time']} - {ev['title']} ({ev['duration']})"
+                    line = f"* {ev['time']} - {ev['title']} ({ev['duration']})"
                     if ev.get("location"):
                         line += f" - {ev['location']}"
                     if ev.get("attendees", 0) > 0:
                         line += f" [{ev['attendees']} attendees]"
                     # Check for conflicts
-                    conflict_msg = conflict_lookup.get((day["date"], ev["title"]))
+                    conflict_msg = conflict_lookup.get(
+                        (day["date"], ev["title"])
+                    )
                     if conflict_msg:
                         line += f" ⚠️ CONFLICT: {conflict_msg}"
                     lines.append(line)
             else:
-                lines.append("    - NA")
+                lines.append("* NA")
 
-        lines.append("")
-
-    # Add conflicts section
-    if conflicts:
-        lines.append("--- CONFLICTS ---")
-        for c in conflicts:
-            event_names = " & ".join(c["events"])
-            lines.append(f"  - {c['time']}: {event_names} ({c['calendar_source']})")
-        lines.append("")
+            lines.append("")
 
     return "\n".join(lines)
 

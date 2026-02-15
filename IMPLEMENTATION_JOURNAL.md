@@ -225,3 +225,116 @@ The unit tests (Phases 2-4) mock agent internals — they test that `CalendarAge
 ### Tests
 
 12 new tests (144 total) — all passing.
+
+---
+
+## Phase 6: Telegram Agent + Chat Format + Scheduling
+
+Three changes in this phase: replaced the LLM-based formatter with a deterministic chat format, added a Telegram delivery agent, and set up automated weekly scheduling via macOS launchd.
+
+### Why drop the LLM?
+
+The Formatter originally sent structured calendar data to Ollama (local LLM) to generate a human-readable summary. In practice, the LLM added latency, inconsistency, and a dependency (Ollama must be running). Since the output format is fixed and well-defined, a deterministic Python function (`build_chat_format()`) produces the exact same result every time — faster, with no external dependency for formatting.
+
+The original `build_markdown()` function is still available for file output, but the primary format is now `build_chat_format()` which produces compact, emoji-styled text optimised for messaging apps.
+
+### Files created
+
+**`agents/telegram/agent.py`** — Core Telegram logic
+> `TelegramAgent` class with a single `send_message(text)` method. Uses the Telegram Bot API directly via `requests` (no python-telegram-bot dependency). Handles API errors, timeouts, and connection failures. Returns delivery confirmation with `message_id`, `chat_id`, and `sent_at`.
+
+**`agents/telegram/server.py`** — A2A-compliant HTTP server
+> Same three-endpoint pattern as all other agents:
+> - `GET /.well-known/agent.json` — Agent Card with `send_telegram_message` skill
+> - `POST /message/send` — Receives text via DataPart, sends to Telegram, returns delivery result as DataPart artifact
+> - `GET /tasks/<id>` — GetTask RPC
+
+**`tests/test_telegram.py`** — Telegram agent tests
+> 7 tests covering: successful send, API error, timeout, connection error, server endpoints (Agent Card, SendMessage, GetTask), empty text handling, and agent error propagation.
+
+**`com.jp.weekly-preview.plist`** — macOS launchd job
+> Schedules `python main.py --next` to run every Sunday at 8pm. Uses the venv Python interpreter and project working directory. Stdout/stderr go to `logs/launchd-stdout.log` and `logs/launchd-stderr.log`. Installed to `~/Library/LaunchAgents/` and loaded via `launchctl load`.
+
+### Files modified
+
+**`agents/formatter/agent.py`** — Replaced LLM with deterministic format
+> `FormatterAgent.format_weekly_preview()` now calls `build_chat_format()` instead of sending a prompt to Ollama. New `build_chat_format()` function produces compact, emoji-styled output: calendar-coloured dots (🔵 JP, 🟢 VT), one line per event, empty days skipped, conflict markers (⚠️). Also added helper functions: `_format_time_compact()` ("9:00 AM" → "9am"), `_duration_minutes()`, `_format_duration_compact()` ("2 hours" → "2hrs").
+
+**`agents/orchestrator/agent.py`** — Added Telegram step to workflow
+> `OrchestratorAgent` now accepts an optional `telegram_url`. After formatting, it sends the summary to the Telegram Agent via A2A (`_send_telegram()`). Telegram failure is non-blocking — the workflow still succeeds and saves the file even if Telegram delivery fails. Discovery now checks for three agents instead of two.
+
+**`config/settings.py`** — Added Telegram settings
+> New fields: `telegram_bot_token`, `telegram_chat_id`, `telegram_port` (default 5003). All loaded from environment variables.
+
+**`main.py`** — Starts Telegram agent, wires it into workflow
+> Now starts three background agents (Calendar, Formatter, Telegram) instead of two. Passes `telegram_url` to the orchestrator. Output shows Telegram delivery status.
+
+### The Formatter's chat format output
+
+```
+📅 *Week of 16-22 Feb*
+
+*Mon 16 Feb*
+🔵 JP: JPVT wed anni (8am)
+
+*Tue 17 Feb*
+🔵 JP: woodlands lunch (12pm)
+🟢 VT: woodlands lunch (12pm)
+
+*Thu 19 Feb*
+🟢 VT: SH lunch (12pm)
+
+*Fri 20 Feb*
+🔵 JP: linda bday (all day)
+🟢 VT: Tricia lunch (12pm)
+🔵 JP: army cny dinner 7pm (7pm)
+
+*Sun 22 Feb*
+🟢 VT: Ah Kor gathering (12pm, 2hrs)
+🔵 JP: weekly plan + supabase (8pm)
+```
+
+Design choices:
+- **Emoji dots by calendar**: 🔵 = first calendar (JP), 🟢 = second (VT), up to 6 colours
+- **Empty days skipped**: No "NA" lines — cleaner for chat
+- **Duration only shown if > 1 hour**: Keeps lines short for typical 30-60 min events
+- **Single-asterisk bold**: Compatible with both WhatsApp (`*bold*`) and Telegram
+
+### The complete A2A message flow (updated)
+
+```
+1. main.py starts Calendar, Formatter, and Telegram agents in background threads
+2. main.py waits for all three to serve Agent Cards (health check)
+3. Orchestrator discovers agents via GET /.well-known/agent.json
+4. Orchestrator → Calendar Agent: POST /message/send (fetch_week_events)
+5. Calendar Agent fetches from Google Calendar API (multiple calendars)
+6. Calendar Agent returns Task with DataPart artifact (events, conflicts)
+7. Orchestrator → Formatter Agent: POST /message/send (format_weekly_preview)
+8. Formatter deterministically builds chat-format summary (no LLM)
+9. Formatter returns Task with TextPart artifact (chat summary)
+10. Orchestrator → Telegram Agent: POST /message/send (send_telegram_message)
+11. Telegram Agent sends text to Telegram Bot API
+12. Telegram Agent returns Task with DataPart artifact (delivery confirmation)
+13. Orchestrator saves summary to output/summaries/YYYY-MM-DD_created-TIMESTAMP.md
+```
+
+### Scheduling
+
+The plist job runs every Sunday at 8pm:
+- Executes: `/path/to/venv/bin/python main.py --next`
+- `--next` generates a preview for the **upcoming** Monday-Sunday week
+- If the Mac is asleep at 8pm, launchd runs it on wake
+- Logs to `logs/launchd-stdout.log` and `logs/launchd-stderr.log`
+
+### Environment variables added
+
+```
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+TELEGRAM_CHAT_ID=<your chat ID>
+TELEGRAM_PORT=5003
+USER_TIMEZONE=Asia/Singapore
+```
+
+### Tests
+
+35 new tests (179 total) — all passing.

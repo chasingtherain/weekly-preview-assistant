@@ -82,17 +82,17 @@ class TestSaveSummary:
         save_summary("content", "2025-02-17")
         assert os.path.isdir(tmp_path / "output" / "summaries")
 
-    def test_filename_uses_week_start_and_time(self, tmp_path, monkeypatch) -> None:
+    def test_filename_includes_week_start_and_creation_timestamp(self, tmp_path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         file_path = save_summary("content", "2025-03-10")
-        # Filename should be YYYY-MM-DD-HHMM.md
+        # Filename: {week_start}_created-{YYYY-MM-DD-HHMMSS}.md
         filename = os.path.basename(file_path)
-        assert filename.startswith("2025-03-10-")
+        assert filename.startswith("2025-03-10_created-")
         assert filename.endswith(".md")
-        # HHMM portion should be 4 digits
-        time_part = filename.replace("2025-03-10-", "").replace(".md", "")
-        assert len(time_part) == 4
-        assert time_part.isdigit()
+        # Extract creation timestamp
+        created_part = filename.replace("2025-03-10_created-", "").replace(".md", "")
+        # Should be YYYY-MM-DD-HHMMSS (17 chars)
+        assert len(created_part) == 17
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +208,7 @@ class TestOrchestratorAgent:
         assert result["total_events"] == 1
         assert result["week_start"] == "2025-02-17"
         assert result["week_end"] == "2025-02-23"
+        assert result["telegram_sent"] is False
         assert os.path.exists(result["file_path"])
         assert mock_send.call_count == 2
 
@@ -290,6 +291,86 @@ class TestOrchestratorAgent:
         result = agent.generate_weekly_preview()
         assert "error" in result
         assert "Formatter Agent" in result["error"]
+
+    @patch("agents.orchestrator.agent.send_message")
+    @patch("agents.orchestrator.agent.discover_agents")
+    @patch("agents.orchestrator.agent.calculate_week_range")
+    def test_generate_with_telegram(
+        self, mock_range, mock_discover, mock_send, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        mock_range.return_value = ("2025-02-17", "2025-02-23")
+
+        mock_discover.return_value = [
+            {"name": "Cal", "skills": [{"id": "fetch_week_events"}],
+             "supported_interfaces": [{"url": "http://localhost:5001"}]},
+            {"name": "Fmt", "skills": [{"id": "format_weekly_preview"}],
+             "supported_interfaces": [{"url": "http://localhost:5002"}]},
+            {"name": "Telegram", "skills": [{"id": "send_telegram_message"}],
+             "supported_interfaces": [{"url": "http://localhost:5003"}]},
+        ]
+
+        telegram_response = create_task(state=TaskState.COMPLETED)
+        telegram_response["artifacts"] = [
+            create_artifact(parts=[data_part({"message_id": 123, "chat_id": "456"})])
+        ]
+        telegram_response["status"] = create_task_status(TaskState.COMPLETED)
+
+        mock_send.side_effect = [
+            _make_calendar_response([], [], 0, ""),
+            _make_formatter_response("Preview text", 2),
+            {"task": telegram_response},
+        ]
+
+        agent = OrchestratorAgent(
+            calendar_url="http://localhost:5001",
+            formatter_url="http://localhost:5002",
+            calendars=[{"calendar_id": "primary", "label": "You"}],
+            timezone="America/Los_Angeles",
+            telegram_url="http://localhost:5003",
+        )
+        result = agent.generate_weekly_preview()
+
+        assert "error" not in result
+        assert result["telegram_sent"] is True
+        assert mock_send.call_count == 3
+
+    @patch("agents.orchestrator.agent.send_message")
+    @patch("agents.orchestrator.agent.discover_agents")
+    @patch("agents.orchestrator.agent.calculate_week_range")
+    def test_telegram_failure_does_not_block_workflow(
+        self, mock_range, mock_discover, mock_send, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        mock_range.return_value = ("2025-02-17", "2025-02-23")
+
+        mock_discover.return_value = [
+            {"name": "Cal", "skills": [{"id": "fetch_week_events"}],
+             "supported_interfaces": [{"url": "http://localhost:5001"}]},
+            {"name": "Fmt", "skills": [{"id": "format_weekly_preview"}],
+             "supported_interfaces": [{"url": "http://localhost:5002"}]},
+            {"name": "Telegram", "skills": [{"id": "send_telegram_message"}],
+             "supported_interfaces": [{"url": "http://localhost:5003"}]},
+        ]
+
+        mock_send.side_effect = [
+            _make_calendar_response([], [], 0, ""),
+            _make_formatter_response("Preview text", 2),
+            {"error": {"code": "TimeoutError", "message": "Timeout"}},
+        ]
+
+        agent = OrchestratorAgent(
+            calendar_url="http://localhost:5001",
+            formatter_url="http://localhost:5002",
+            calendars=[{"calendar_id": "primary", "label": "You"}],
+            timezone="America/Los_Angeles",
+            telegram_url="http://localhost:5003",
+        )
+        result = agent.generate_weekly_preview()
+
+        assert "error" not in result
+        assert result["telegram_sent"] is False
+        assert os.path.exists(result["file_path"])
 
 
 # ---------------------------------------------------------------------------
