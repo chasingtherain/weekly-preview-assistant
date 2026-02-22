@@ -14,6 +14,7 @@ import logging
 import socket
 import sys
 import time
+from datetime import datetime
 from threading import Thread
 
 from agents.calendar.server import app as calendar_app
@@ -117,7 +118,8 @@ def main() -> None:
 
     settings = load_settings()
 
-    print("Starting Weekly Preview Assistant...")
+    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"=== Weekly Preview Assistant - {run_ts} ===")
     print("  Waiting for network...")
     if not wait_for_network():
         print("  ERROR: No network after 60s. Exiting.")
