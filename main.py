@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import logging
+import socket
 import sys
 import time
 from threading import Thread
@@ -26,6 +27,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("main")
+
+
+def wait_for_network(host: str = "oauth2.googleapis.com", timeout: int = 60) -> bool:
+    """Wait until DNS resolves successfully, giving network time to come up after sleep.
+
+    Args:
+        host: Hostname to resolve as a connectivity check.
+        timeout: Max seconds to wait.
+
+    Returns:
+        True if network is available, False if timeout reached.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            socket.getaddrinfo(host, 443)
+            return True
+        except OSError:
+            time.sleep(5)
+    return False
 
 
 def start_agent_server(app, port: int, name: str) -> Thread:
@@ -97,6 +118,11 @@ def main() -> None:
     settings = load_settings()
 
     print("Starting Weekly Preview Assistant...")
+    print("  Waiting for network...")
+    if not wait_for_network():
+        print("  ERROR: No network after 60s. Exiting.")
+        sys.exit(1)
+
     print()
 
     # Start agent servers
