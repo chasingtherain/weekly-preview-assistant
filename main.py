@@ -114,6 +114,12 @@ def main() -> None:
         dest="next_week",
         help="Generate preview for the following week instead of the current week.",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        dest="check_changes",
+        help="Check if current week calendar changed and send Telegram update if so.",
+    )
     args = parser.parse_args()
 
     settings = load_settings()
@@ -176,6 +182,22 @@ def main() -> None:
         timezone=settings.user_timezone,
         telegram_url=telegram_url,
     )
+
+    if args.check_changes:
+        print("Checking current week for calendar changes...")
+        result = orchestrator.check_for_changes()
+        if "error" in result:
+            print(f"  ERROR: {result['error']}")
+            sys.exit(1)
+        if result["changed"]:
+            print(f"  Changes detected — {result['total_events']} events")
+            if result.get("telegram_sent"):
+                print("  Sent update to Telegram")
+            print()
+            print(f"Updated summary saved to: {result['file_path']}")
+        else:
+            print("  No changes detected. Nothing sent.")
+        return
 
     print("Fetching calendar events...")
     result = orchestrator.generate_weekly_preview(next_week=args.next_week)

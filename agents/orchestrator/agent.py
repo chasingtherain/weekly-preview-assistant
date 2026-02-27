@@ -9,6 +9,7 @@ sends SendMessageRequests, and reads Task results. It does NOT call agent
 functions directly; all communication goes through A2A messages over HTTP.
 """
 
+import hashlib
 import logging
 import os
 from datetime import datetime, timedelta
@@ -147,6 +148,65 @@ class OrchestratorAgent:
             "week_start": start_date,
             "week_end": end_date,
             "total_events": total_events,
+            "telegram_sent": telegram_sent,
+        }
+
+    def check_for_changes(self) -> dict[str, Any]:
+        """Check if the current week's calendar has changed since the last summary.
+
+        Fetches fresh events, formats them, and compares to the last saved summary.
+        Sends a Telegram update and saves a new file only if content has changed.
+
+        Returns:
+            Dict with "changed": False if no change, or "changed": True plus
+            "file_path", "total_events", "telegram_sent" on change.
+            Contains "error" key on failure.
+        """
+        start_date, end_date = calculate_week_range(next_week=False)
+        week_start = start_date
+        logger.info("Checking for changes: %s to %s", start_date, end_date)
+
+        skill_map = self.discover()
+        if "fetch_week_events" not in skill_map:
+            return {"error": "Calendar Agent not available (fetch_week_events skill not found)"}
+        if "format_weekly_preview" not in skill_map:
+            return {"error": "Formatter Agent not available (format_weekly_preview skill not found)"}
+
+        calendar_result = self._fetch_calendar_events(start_date, end_date)
+        if "error" in calendar_result:
+            return calendar_result
+
+        format_result = self._format_preview(
+            events=calendar_result["events"],
+            conflicts=calendar_result["conflicts"],
+            week_start=week_start,
+            total_events=calendar_result["total_events"],
+            busiest_day=calendar_result["busiest_day"],
+        )
+        if "error" in format_result:
+            return format_result
+
+        new_summary = format_result["formatted_summary"]
+        last_summary = _get_last_summary(week_start)
+
+        if not _has_changed(new_summary, last_summary):
+            logger.info("No calendar changes detected for week of %s", week_start)
+            return {"changed": False}
+
+        logger.info("Calendar changes detected — saving and sending update")
+        file_path = save_summary(new_summary, week_start)
+
+        telegram_sent = False
+        if "send_telegram_message" in skill_map:
+            telegram_result = self._send_telegram(new_summary)
+            telegram_sent = "error" not in telegram_result
+            if not telegram_sent:
+                logger.warning("Telegram delivery failed: %s", telegram_result.get("error"))
+
+        return {
+            "changed": True,
+            "file_path": file_path,
+            "total_events": calendar_result["total_events"],
             "telegram_sent": telegram_sent,
         }
 
@@ -326,6 +386,37 @@ class OrchestratorAgent:
                 return part["data"]
 
         return {"error": "Telegram Agent artifact has no DataPart"}
+
+
+def _get_last_summary(week_start: str) -> str | None:
+    """Return the content of the latest saved summary for the given week.
+
+    Args:
+        week_start: Monday date (YYYY-MM-DD) identifying the week.
+
+    Returns:
+        File content as string, or None if no summary exists yet.
+    """
+    output_dir = Path("output/summaries")
+    files = sorted(output_dir.glob(f"{week_start}_created-*.md"))
+    return files[-1].read_text(encoding="utf-8") if files else None
+
+
+def _has_changed(new_summary: str, last_summary: str | None) -> bool:
+    """Return True if new_summary differs from last_summary.
+
+    Args:
+        new_summary: Freshly generated summary text.
+        last_summary: Last saved summary text, or None if none exists.
+
+    Returns:
+        True if content differs or no previous summary exists.
+    """
+    if last_summary is None:
+        return True
+    new_hash = hashlib.sha256(new_summary.encode()).hexdigest()
+    old_hash = hashlib.sha256(last_summary.encode()).hexdigest()
+    return new_hash != old_hash
 
 
 def calculate_week_range(next_week: bool = False) -> tuple[str, str]:
