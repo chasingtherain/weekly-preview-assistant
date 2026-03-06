@@ -34,3 +34,4 @@ Thumbs.db
 
 # Runtime
 config/agents.json
+logs/*.log
