@@ -128,6 +128,21 @@ class OrchestratorAgent:
 
         summary = format_result["formatted_summary"]
 
+        last_summary = _get_last_summary(start_date)
+        summary_changed = _has_changed(summary, last_summary)
+
+        if not summary_changed:
+            logger.info("No summary changes detected for week of %s", start_date)
+            return {
+                "summary": summary,
+                "file_path": _get_last_summary_path(start_date) or "",
+                "week_start": start_date,
+                "week_end": end_date,
+                "total_events": total_events,
+                "telegram_sent": False,
+            }
+
+
         # Step 5: Send via Telegram (optional, non-blocking on failure)
         telegram_sent = False
         if "send_telegram_message" in skill_map:

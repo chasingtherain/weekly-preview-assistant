@@ -211,6 +211,45 @@ class TestOrchestratorAgent:
         assert result["telegram_sent"] is False
         assert os.path.exists(result["file_path"])
         assert mock_send.call_count == 2
+    
+    @patch("agents.orchestrator.agent.send_message")
+    @patch("agents.orchestrator.agent.discover_agents")
+    @patch("agents.orchestrator.agent.calculate_week_range")
+    def test_generate_weekly_preview_skips_telegram_when_summary_unchanged(
+        self, mock_range, mock_discover, mock_send, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        mock_range.return_value = ("2025-02-17", "2025-02-23")
+
+        mock_discover.return_value = [
+            {"name": "Cal", "skills": [{"id": "fetch_week_events"}],
+             "supported_interfaces": [{"url": "http://localhost:5001"}]},
+            {"name": "Fmt", "skills": [{"id": "format_weekly_preview"}],
+             "supported_interfaces": [{"url": "http://localhost:5002"}]},
+            {"name": "Telegram", "skills": [{"id": "send_telegram_message"}],
+             "supported_interfaces": [{"url": "http://localhost:5003"}]},
+        ]
+
+        save_summary("# WEEK OF FEB 17-23\n\nPreview content.", "2025-02-17")
+
+        mock_send.side_effect = [
+            _make_calendar_response([], [], 0, ""),
+            _make_formatter_response("# WEEK OF FEB 17-23\n\nPreview content.", 5),
+        ]
+
+        agent = OrchestratorAgent(
+            calendar_url="http://localhost:5001",
+            formatter_url="http://localhost:5002",
+            calendars=[{"calendar_id": "primary", "label": "You"}],
+            timezone="America/Los_Angeles",
+            telegram_url="http://localhost:5003",
+        )
+        result = agent.generate_weekly_preview()
+
+        assert "error" not in result
+        assert result["telegram_sent"] is False
+        assert result["file_path"].endswith(".md")
+        assert mock_send.call_count == 2
 
     @patch("agents.orchestrator.agent.discover_agents")
     def test_missing_calendar_agent(self, mock_discover) -> None:
